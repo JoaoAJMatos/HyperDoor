@@ -9,7 +9,6 @@ import sys
 import time
 from vidstream import ScreenShareClient
 from requests import get
-import urllib
 import geocoder
 from Crypto.Cipher import AES
 import base64
