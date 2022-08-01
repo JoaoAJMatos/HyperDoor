@@ -7,3 +7,4 @@ pick
 GPUtil
 psutil
 tabulate
+paramiko
